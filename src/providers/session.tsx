@@ -58,6 +58,18 @@ export type SessionState =
   | "authenticated"
   | "unauthenticated";
 
+/**
+ * Result of a logout attempt. `serverRevoked` distinguishes a confirmed
+ * server-side session revocation from a case where local state was cleared
+ * but the server logout request never succeeded (rate-limited, network
+ * failure, or a non-2xx response) — in that case the httpOnly session
+ * cookie may still be valid server-side, and callers should warn the user
+ * rather than silently treating this the same as a clean logout.
+ */
+export interface LogoutResult {
+  serverRevoked: boolean;
+}
+
 import type { SessionUser } from "@/types/session";
 
 export type { SessionUser };
@@ -67,7 +79,7 @@ interface SessionContextValue {
   user: SessionUser | null;
   isAuthenticated: boolean;
 
-  logout: () => Promise<void>;
+  logout: () => Promise<LogoutResult>;
 
   storeSession: (
     accessToken: string,
@@ -517,22 +529,36 @@ export function SessionProvider({
    * -------------------------
    */
 
-  const logout = useCallback(async () => {
+  const logout = useCallback(async (): Promise<LogoutResult> => {
     if (!checkRateLimit("auth:logout", LOGOUT_RATE_LIMIT.maxAttempts, LOGOUT_RATE_LIMIT.windowMs)) {
       console.warn("Logout rate limit exceeded. Please wait before trying again.");
-      return;
+      // Companion issue: the throttle path intentionally does not clear
+      // local state or broadcast — that UX is tracked separately. Either
+      // way, the server session was not revoked, so report it honestly.
+      return { serverRevoked: false };
     }
+
+    let serverRevoked = true;
 
     try {
       await api.post(ENDPOINTS.auth.logout);
     } catch (error) {
+      serverRevoked = false;
       logger.error("logout-request-failed", {
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      // Local state is always cleared, even when the server request fails —
+      // refusing to clear would leave the UI stuck in an authenticated state
+      // it can no longer trust. Callers are responsible for surfacing
+      // `serverRevoked: false` to the user so they know the server session
+      // may still be active (it will be re-probed via /auth/session on the
+      // next bootstrap).
       clearSession();
       broadcastLogout();
     }
+
+    return { serverRevoked };
   }, [clearSession]);
 
   /**
