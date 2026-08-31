@@ -140,10 +140,13 @@ export default function SettingsPage() {
     setSessionActionFeedback(null);
     setSessionActionError(null);
     try {
-      await logout();
+      const { serverRevoked } = await logout();
+      if (!serverRevoked) {
+        setSessionActionError(
+          "Signed out on this device, but we couldn't confirm the server session was revoked. If you're on a shared device, please close the browser to be safe."
+        );
+      }
       router.replace("/login");
-    } catch {
-      setSessionActionError("Sign out failed. Please try again.");
     } finally {
       setSessionActionLoading(null);
     }
